@@ -1,0 +1,20 @@
+{
+  "name": "lombokcliparse",
+  "version": "0.1.0",
+  "description": "Lightweight CLI argument parser — positional args, flags, options, subcommands, auto-help",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codinglombok/LombokCLIParse"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node dist/test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4"
+  }
+}

@@ -1,0 +1,16 @@
+{
+    "name": "codinglombok/lombokcliparse",
+    "description": "Lightweight CLI argument parser — positional args, flags, options, subcommands, auto-help, env fallback, type parsing. Zero dependencies.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": ["cli", "argument", "parser", "command-line", "flags", "options", "subcommands"],
+    "require": {
+        "php": ">=8.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "LombokCLIParse\\": "src/"
+        }
+    },
+    "minimum-stability": "stable"
+}

@@ -1,0 +1,13 @@
+[package]
+name = "lombokcliparse"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight CLI argument parser — positional args, flags, options, subcommands, auto-help"
+license = "Apache-2.0"
+repository = "https://github.com/codinglombok/LombokCLIParse"
+keywords = ["cli", "parser", "args", "command-line"]
+categories = ["command-line-interface"]
+
+[features]
+default = ["std"]
+std = []
