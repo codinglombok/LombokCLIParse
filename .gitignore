@@ -7,12 +7,15 @@ Cargo.lock
 node_modules/
 /typescript/dist/
 /typescript/node_modules/
+/typescript/build/
 *.tsbuildinfo
 
 # Python
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+htmlcov/
 *.egg-info/
 dist/
 build/
@@ -30,3 +33,8 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Dokumen internal (ADR-024)
+/map
+/docs/*architecture*.*
+/docs/*masterplan*.*

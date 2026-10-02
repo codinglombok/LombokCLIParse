@@ -5,405 +5,422 @@ declare(strict_types=1);
 namespace LombokCLIParse;
 
 /**
- * CLI application builder.
- *
- * Example:
- *   $app = (new App('myapp', 'My application'))
- *       ->version('1.0.0')
- *       ->positional('input', 'Input file', ArgType::STR, required: true)
- *       ->flag('verbose', 'Enable verbose', short: 'v')
- *       ->option('port', 'Port', ArgType::INT, short: 'p', default: '8080');
- *
- *   $matches = $app->parse(['myapp', 'data.txt', '--verbose', '-p', '3000']);
+ * A command-line application or subcommand definition (builder). The same
+ * input gives the same result, error message and help text as the Rust,
+ * TypeScript, Python and Go ports (docs/SPEC_LombokCLIParse_v0.2.0.md).
  */
 final class App
 {
-    private ?string $ver = null;
+    public const MAX_SAFE_INTEGER = 9007199254740991;
 
-    /** @var list<array{name:string, help:string, argType:ArgType, required:bool}> */
+    private const BOOLS = ['true' => true, '1' => true, 'yes' => true, 'on' => true, 'false' => false, '0' => false, 'no' => false, 'off' => false];
+    private const PLACEHOLDER = ['string' => '<VALUE>', 'int' => '<INT>', 'float' => '<FLOAT>', 'bool' => '<BOOL>'];
+
+    private ?string $version = null;
+    /** @var list<array{name: string, help: string, type: ArgType, required: bool}> */
     private array $positionals = [];
+    /** @var list<array{kind: string, name: string, help: string, short: ?string, type?: ArgType, default?: ?string, env?: ?string}> */
+    private array $args = [];
+    /** @var list<App> */
+    private array $subs = [];
 
-    /** @var list<array{name:string, help:string, short:?string}> */
-    private array $flags = [];
+    public function __construct(private readonly string $name, private readonly string $description = '')
+    {
+    }
 
-    /** @var list<array{name:string, help:string, argType:ArgType, short:?string, default:?string, envVar:?string}> */
-    private array $options = [];
-
-    /** @var array<string, App> */
-    private array $subcommands = [];
-
-    public function __construct(
-        private readonly string $name,
-        private readonly string $description,
-    ) {}
-
+    /** Sets the version; enables --version. */
     public function version(string $v): self
     {
-        $this->ver = $v;
+        $this->version = $v;
         return $this;
     }
 
-    public function positional(
-        string  $name,
-        string  $help,
-        ArgType $argType,
-        bool    $required = false,
-    ): self {
-        $this->positionals[] = [
-            'name' => $name, 'help' => $help,
-            'argType' => $argType, 'required' => $required,
-        ];
+    /** Adds a positional argument (filled in definition order). */
+    public function positional(string $name, string $help, ArgType $type = ArgType::STR, bool $required = false): self
+    {
+        $this->positionals[] = ['name' => $name, 'help' => $help, 'type' => $type, 'required' => $required];
         return $this;
     }
 
+    /** Adds a boolean flag, --name or -c. */
     public function flag(string $name, string $help, ?string $short = null): self
     {
-        $this->flags[] = ['name' => $name, 'help' => $help, 'short' => $short];
+        $this->args[] = ['kind' => 'flag', 'name' => $name, 'help' => $help, 'short' => $short];
         return $this;
     }
 
-    public function option(
-        string  $name,
-        string  $help,
-        ArgType $argType,
-        ?string $short   = null,
-        ?string $default = null,
-        ?string $envVar  = null,
-    ): self {
-        $this->options[] = [
-            'name' => $name, 'help' => $help, 'argType' => $argType,
-            'short' => $short, 'default' => $default, 'envVar' => $envVar,
-        ];
+    /** Adds an option taking a value; when absent, $envVar and then $default are used. */
+    public function option(string $name, string $help, ArgType $type = ArgType::STR, ?string $short = null, ?string $default = null, ?string $envVar = null): self
+    {
+        $this->args[] = ['kind' => 'option', 'name' => $name, 'help' => $help, 'short' => $short, 'type' => $type, 'default' => $default, 'env' => $envVar];
         return $this;
     }
 
+    /** Adds a subcommand. An app with subcommands has no positional arguments. */
+    public function subcommand(App $sub): self
+    {
+        $this->subs[] = $sub;
+        return $this;
+    }
+
+    /** Same as subcommand() (0.1 name). */
     public function sub(App $sub): self
     {
-        $this->subcommands[$sub->name] = $sub;
-        return $this;
+        return $this->subcommand($sub);
     }
 
-    // ── Help ──
-
-    public function help(): string
+    /** Parses $raw as $type; null when the text is not valid for the type. */
+    public static function parseValue(ArgType $type, string $raw): ?Value
     {
-        $out = $this->name;
-        if ($this->ver !== null) {
-            $out .= ' ' . $this->ver;
+        switch ($type) {
+            case ArgType::STR:
+                return Value::str($raw);
+            case ArgType::INT:
+                if (preg_match('/^[+-]?[0-9]+$/D', $raw) !== 1 || strlen(ltrim(ltrim($raw, '+-'), '0')) > 16) {
+                    return null;
+                }
+                $n = (int) $raw;
+                return abs($n) <= self::MAX_SAFE_INTEGER ? Value::int($n) : null;
+            case ArgType::FLOAT:
+                if (preg_match('/^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/D', $raw) !== 1) {
+                    return null;
+                }
+                $f = (float) $raw;
+                return is_finite($f) ? Value::float($f) : null;
+            default:
+                if (preg_match('/^[\x00-\x7f]*$/D', $raw) !== 1) {
+                    return null;
+                }
+                $b = self::BOOLS[strtolower($raw)] ?? null;
+                return $b === null ? null : Value::bool($b);
         }
-        $out .= "\n{$this->description}\n\n";
+    }
 
-        $out .= "USAGE:\n    {$this->name}";
-        if ($this->subcommands) {
-            $out .= ' <COMMAND>';
+    private static function validName(string $n): bool
+    {
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9_-]*$/D', $n) === 1;
+    }
+
+    private static function defErr(string $arg, string $reason): ParseError
+    {
+        return new ParseError('INVALID_DEFINITION', $arg, reason: $reason);
+    }
+
+    /** Checks the rules of SPEC section 2; throws INVALID_DEFINITION. */
+    public function validate(): void
+    {
+        $names = [];
+        $shorts = [];
+        foreach ([...$this->positionals, ...$this->args] as $a) {
+            $n = $a['name'];
+            if (!self::validName($n)) {
+                throw self::defErr($n, 'invalid name');
+            }
+            if ($n === 'help' || ($n === 'version' && $this->version !== null)) {
+                throw self::defErr($n, 'reserved name');
+            }
+            if (isset($names[$n])) {
+                throw self::defErr($n, 'duplicate name');
+            }
+            $names[$n] = true;
+            $s = $a['short'] ?? null;
+            if ($s !== null) {
+                if (preg_match('/^[A-Za-z]$/D', $s) !== 1) {
+                    throw self::defErr($s, 'invalid short');
+                }
+                if (isset($shorts[$s])) {
+                    throw self::defErr($s, 'duplicate short');
+                }
+                $shorts[$s] = true;
+            }
+            if (($a['kind'] ?? '') === 'option' && $a['default'] !== null && self::parseValue($a['type'], $a['default']) === null) {
+                throw self::defErr($n, 'invalid default');
+            }
         }
-        if ($this->options || $this->flags) {
-            $out .= ' [OPTIONS]';
-        }
+        $seenOptional = false;
         foreach ($this->positionals as $p) {
-            $n = strtoupper($p['name']);
-            $out .= $p['required'] ? " <{$n}>" : " [{$n}]";
-        }
-        $out .= "\n\n";
-
-        if ($this->positionals) {
-            $out .= "ARGS:\n";
-            foreach ($this->positionals as $p) {
-                $n   = strtoupper($p['name']);
-                $req = $p['required'] ? ' (required)' : '';
-                $out .= "    <{$n}>    {$p['help']}{$req}\n";
+            if ($p['required'] && $seenOptional) {
+                throw self::defErr($p['name'], 'required after optional');
             }
-            $out .= "\n";
+            $seenOptional = $seenOptional || !$p['required'];
         }
-
-        if ($this->subcommands) {
-            $out .= "COMMANDS:\n";
-            $names = array_keys($this->subcommands);
-            sort($names);
-            foreach ($names as $n) {
-                $desc = $this->subcommands[$n]->description;
-                $out .= sprintf("    %-16s%s\n", $n, $desc);
-            }
-            $out .= "\n";
+        if ($this->subs !== [] && $this->positionals !== []) {
+            throw self::defErr($this->subs[0]->name, 'positionals with subcommands');
         }
-
-        if ($this->flags || $this->options) {
-            $out .= "OPTIONS:\n";
-            foreach ($this->flags as $f) {
-                $s = $f['short'] ? "-{$f['short']}, " : '    ';
-                $out .= sprintf("    %s--%-16s%s\n", $s, $f['name'], $f['help']);
+        $subNames = [];
+        foreach ($this->subs as $s) {
+            if (!self::validName($s->name)) {
+                throw self::defErr($s->name, 'invalid name');
             }
-            foreach ($this->options as $o) {
-                $s = $o['short'] ? "-{$o['short']}, " : '    ';
-                $d = $o['default'] !== null && $o['default'] !== '' ? " [default: {$o['default']}]" : '';
-                $e = $o['envVar'] !== null && $o['envVar'] !== '' ? " [env: {$o['envVar']}]" : '';
-                $out .= sprintf("    %s--%-16s%s%s%s\n", $s, $o['name'], $o['help'], $d, $e);
+            if (isset($subNames[$s->name])) {
+                throw self::defErr($s->name, 'duplicate name');
             }
-            $out .= "        --help            Show this help message\n";
+            $subNames[$s->name] = true;
+            $s->validate();
         }
+    }
 
+    private static function cpLen(string $s): int
+    {
+        return (int) preg_match_all('/./us', $s);
+    }
+
+    /** @param list<string> $parts */
+    private static function join(array $parts): string
+    {
+        return implode(' ', array_values(array_filter($parts, static fn ($p) => $p !== '')));
+    }
+
+    /** @param list<array{0: string, 1: string}> $rows */
+    private static function section(string $title, array $rows): string
+    {
+        $width = max(array_map(static fn ($r) => self::cpLen($r[0]), $rows));
+        $out = $title . ":\n";
+        foreach ($rows as [$left, $help]) {
+            $out .= $help !== '' ? '    ' . $left . str_repeat(' ', $width - self::cpLen($left) + 2) . $help . "\n" : '    ' . $left . "\n";
+        }
         return $out;
     }
 
-    // ── Parse ──
-
-    /**
-     * Parse args (first element = program name, skipped).
-     *
-     * @param list<string> $args
-     */
-    public function parse(array $args): Matches
+    /** The help text (SPEC section 5) as shown for --help. */
+    public function help(): string
     {
-        return $this->parseSlice(array_slice($args, 1));
+        return $this->helpAt($this->name);
+    }
+
+    private function helpAt(string $path): string
+    {
+        $out = $this->name . ($this->version !== null ? ' ' . $this->version : '') . "\n";
+        if ($this->description !== '') {
+            $out .= $this->description . "\n";
+        }
+        $out .= "\nUSAGE:\n    " . $path . ' [OPTIONS]';
+        if ($this->subs !== []) {
+            $out .= ' <COMMAND>';
+        }
+        foreach ($this->positionals as $p) {
+            $n = strtoupper($p['name']);
+            $out .= $p['required'] ? " <$n>" : " [$n]";
+        }
+        $out .= "\n";
+        if ($this->positionals !== []) {
+            $rows = array_map(static fn ($p) => ['<' . strtoupper($p['name']) . '>', self::join([$p['help'], $p['required'] ? '(required)' : ''])], $this->positionals);
+            $out .= "\n" . self::section('ARGS', $rows);
+        }
+        if ($this->subs !== []) {
+            $out .= "\n" . self::section('COMMANDS', array_map(static fn (App $s) => [$s->name, $s->description], $this->subs));
+        }
+        $rows = [];
+        foreach ($this->args as $a) {
+            $left = ($a['short'] !== null ? '-' . $a['short'] . ', ' : '    ') . '--' . $a['name'];
+            if ($a['kind'] === 'flag') {
+                $rows[] = [$left, $a['help']];
+                continue;
+            }
+            $rows[] = [
+                $left . ' ' . self::PLACEHOLDER[$a['type']->value],
+                self::join([$a['help'], $a['default'] !== null ? '[default: ' . $a['default'] . ']' : '', $a['env'] !== null ? '[env: ' . $a['env'] . ']' : '']),
+            ];
+        }
+        $rows[] = ['    --help', 'Print help'];
+        if ($this->version !== null) {
+            $rows[] = ['    --version', 'Print version'];
+        }
+        return $out . "\n" . self::section('OPTIONS', $rows);
     }
 
     /**
-     * Parse from $_SERVER['argv'].
+     * Parses a full command line ($argv[0] is the program name) with the
+     * process environment (getenv) for fallback values.
+     *
+     * @param list<string> $argv
      */
+    public function parse(array $argv): Matches
+    {
+        return $this->parseWithEnv(array_slice($argv, 1), static function (string $k): ?string {
+            $v = getenv($k);
+            return $v === false ? null : $v;
+        });
+    }
+
+    /**
+     * Parses $tokens (without the program name) with an explicit environment:
+     * an array of name => value, or a callable returning ?string.
+     *
+     * @param list<string> $tokens
+     * @param array<string, string>|callable(string): ?string $env
+     */
+    public function parseWithEnv(array $tokens, array|callable $env = []): Matches
+    {
+        $this->validate();
+        $lookup = is_callable($env) ? $env : static fn (string $k): ?string => array_key_exists($k, $env) ? (string) $env[$k] : null;
+        return $this->parseTokens(array_values($tokens), $lookup, $this->name);
+    }
+
+    /** Parses $_SERVER['argv']. */
     public function parseEnv(): Matches
     {
         return $this->parse($_SERVER['argv'] ?? []);
     }
 
-    // ── Internal ──
+    /**
+     * Parses $_SERVER['argv']; prints help or version and exits with 0, or
+     * prints the error to STDERR and exits with 2.
+     */
+    public function run(): Matches
+    {
+        try {
+            return $this->parseEnv();
+        } catch (ParseError $e) {
+            if ($e->isInfo()) {
+                echo $e->text;
+                exit(0);
+            }
+            fwrite(STDERR, 'error: ' . $e->getMessage() . "\n");
+            exit(2);
+        }
+    }
+
+    private static function set(Matches $m, array $a, string $raw, string $arg): void
+    {
+        $v = self::parseValue($a['type'], $raw);
+        if ($v === null) {
+            throw new ParseError('INVALID_VALUE', $arg, value: $raw);
+        }
+        $m->setValue($a['name'], $v);
+    }
+
+    private function findArg(string $key, string $value): ?array
+    {
+        foreach ($this->args as $a) {
+            if ($a[$key] === $value) {
+                return $a;
+            }
+        }
+        return null;
+    }
 
     /**
-     * @param list<string> $args
+     * @param list<string> $tokens
+     * @param callable(string): ?string $env
      */
-    private function parseSlice(array $args): Matches
+    private function parseTokens(array $tokens, callable $env, string $path): Matches
     {
-        $matches = new Matches();
-        $posIdx  = 0;
-        $i       = 0;
+        $m = new Matches();
+        $posIdx = 0;
+        $i = 0;
         $afterDD = false;
-        $count   = count($args);
-
+        $count = count($tokens);
         while ($i < $count) {
-            $arg = $args[$i];
-
-            if ($afterDD) {
-                $matches->addRest($arg);
-                $i++;
-                continue;
-            }
-
-            if ($arg === '--') {
-                $afterDD = true;
-                $i++;
-                continue;
-            }
-
-            // --name=value or --name value
-            if (str_starts_with($arg, '--')) {
-                $rest = substr($arg, 2);
-                if ($rest === 'help') {
-                    echo $this->help();
-                    exit(0);
-                }
-
-                $eqPos = strpos($rest, '=');
-                if ($eqPos !== false) {
-                    $optName   = substr($rest, 0, $eqPos);
-                    $inlineVal = substr($rest, $eqPos + 1);
-                } else {
-                    $optName   = $rest;
-                    $inlineVal = null;
-                }
-
-                // Flag?
-                $flagDef = $this->findFlag($optName);
-                if ($flagDef !== null) {
-                    $matches->setFlag($optName);
-                    $i++;
+            $tok = $tokens[$i];
+            $i++;
+            if (!$afterDD) {
+                if ($tok === '--') {
+                    $afterDD = true;
                     continue;
                 }
-
-                // Option?
-                $optDef = $this->findOpt($optName);
-                if ($optDef !== null) {
-                    if ($inlineVal !== null) {
-                        $valStr = $inlineVal;
-                    } else {
-                        $i++;
-                        if ($i >= $count) {
-                            throw new ParseError('missing_value', "missing value for: --{$optName}");
-                        }
-                        $valStr = $args[$i];
+                if ($tok === '--help') {
+                    throw new ParseError('HELP', text: $this->helpAt($path));
+                }
+                if ($tok === '--version' && $this->version !== null) {
+                    throw new ParseError('VERSION', text: $this->name . ' ' . $this->version . "\n");
+                }
+                if (str_starts_with($tok, '--')) {
+                    $body = substr($tok, 2);
+                    $eq = strpos($body, '=');
+                    $name = $eq === false ? $body : substr($body, 0, $eq);
+                    $inline = $eq === false ? null : substr($body, $eq + 1);
+                    $arg = '--' . $name;
+                    $a = $this->findArg('name', $name);
+                    if ($a === null) {
+                        throw new ParseError('UNKNOWN_ARGUMENT', $arg);
                     }
-                    $matches->setValue($optDef['name'], self::parseValue($optDef['name'], $valStr, $optDef['argType']));
-                    $i++;
-                    continue;
-                }
-
-                throw new ParseError('unknown_arg', "unknown argument: --{$optName}");
-            }
-
-            // Short: -v, -p value, -vn
-            if (str_starts_with($arg, '-') && strlen($arg) > 1) {
-                $chars = mb_str_split(substr($arg, 1));
-                $ci    = 0;
-                $cLen  = count($chars);
-
-                while ($ci < $cLen) {
-                    $ch = $chars[$ci];
-
-                    $flagDef = $this->findFlagShort($ch);
-                    if ($flagDef !== null) {
-                        $matches->setFlag($flagDef['name']);
-                        $ci++;
+                    if ($a['kind'] === 'flag') {
+                        if ($inline !== null) {
+                            throw new ParseError('FLAG_TAKES_NO_VALUE', $arg);
+                        }
+                        $m->setFlag($a['name']);
                         continue;
                     }
-
-                    $optDef = $this->findOptShort($ch);
-                    if ($optDef !== null) {
-                        if ($ci + 1 < $cLen) {
-                            $valStr = implode('', array_slice($chars, $ci + 1));
-                        } else {
-                            $i++;
-                            if ($i >= $count) {
-                                throw new ParseError('missing_value', "missing value for: {$optDef['name']}");
-                            }
-                            $valStr = $args[$i];
+                    if ($inline === null) {
+                        if ($i >= $count) {
+                            throw new ParseError('MISSING_VALUE', $arg);
                         }
-                        $matches->setValue($optDef['name'], self::parseValue($optDef['name'], $valStr, $optDef['argType']));
-                        // consumed rest of chars — break to next arg
+                        $inline = $tokens[$i++];
+                    }
+                    self::set($m, $a, $inline, $arg);
+                    continue;
+                }
+                if (strlen($tok) > 1 && $tok[0] === '-' && strpbrk($tok[1], '0123456789.') === false) {
+                    $cluster = preg_split('//u', substr($tok, 1), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+                    foreach ($cluster as $k => $c) {
+                        $arg = '-' . $c;
+                        $a = $this->findArg('short', $c);
+                        if ($a === null) {
+                            throw new ParseError('UNKNOWN_ARGUMENT', $arg);
+                        }
+                        if ($a['kind'] === 'flag') {
+                            $m->setFlag($a['name']);
+                            continue;
+                        }
+                        $raw = implode('', array_slice($cluster, $k + 1));
+                        if (str_starts_with($raw, '=')) {
+                            $raw = substr($raw, 1);
+                        } elseif ($raw === '') {
+                            if ($i >= $count) {
+                                throw new ParseError('MISSING_VALUE', $arg);
+                            }
+                            $raw = $tokens[$i++];
+                        }
+                        self::set($m, $a, $raw, $arg);
                         break;
                     }
-
-                    throw new ParseError('unknown_arg', "unknown argument: -{$ch}");
+                    continue;
                 }
-
-                $i++;
-                continue;
             }
-
-            // Subcommand?
-            if ($posIdx === 0 && isset($this->subcommands[$arg])) {
-                $sub       = $this->subcommands[$arg];
-                $subArgs   = array_slice($args, $i + 1);
-                $subM      = $sub->parseSlice($subArgs);
-                $matches->setSubcommand($arg, $subM);
-                return $matches;
+            if (!$afterDD && $this->subs !== []) {
+                $sub = null;
+                foreach ($this->subs as $s) {
+                    if ($s->name === $tok) {
+                        $sub = $s;
+                    }
+                }
+                if ($sub === null) {
+                    throw new ParseError('UNKNOWN_SUBCOMMAND', $tok);
+                }
+                $m->setSubcommand($tok, $sub->parseTokens(array_slice($tokens, $i), $env, $path . ' ' . $tok));
+                break;
             }
-
-            // Positional
             if ($posIdx < count($this->positionals)) {
                 $p = $this->positionals[$posIdx];
-                $matches->setValue($p['name'], self::parseValue($p['name'], $arg, $p['argType']));
+                $v = self::parseValue($p['type'], $tok);
+                if ($v === null) {
+                    throw new ParseError('INVALID_VALUE', $p['name'], value: $tok);
+                }
+                $m->setValue($p['name'], $v);
                 $posIdx++;
+            } elseif ($afterDD) {
+                $m->addRest($tok);
             } else {
-                $matches->addRest($arg);
-            }
-
-            $i++;
-        }
-
-        // Defaults and env vars
-        foreach ($this->options as $o) {
-            if (!$matches->hasValue($o['name'])) {
-                if ($o['envVar'] !== null && $o['envVar'] !== '') {
-                    $envVal = getenv($o['envVar']);
-                    if ($envVal !== false) {
-                        try {
-                            $matches->setValue($o['name'], self::parseValue($o['name'], $envVal, $o['argType']));
-                            continue;
-                        } catch (ParseError) {
-                            // fall through to default
-                        }
-                    }
-                }
-                if ($o['default'] !== null && $o['default'] !== '') {
-                    try {
-                        $matches->setValue($o['name'], self::parseValue($o['name'], $o['default'], $o['argType']));
-                    } catch (ParseError) {
-                        // ignore bad default
-                    }
-                }
+                throw new ParseError('UNEXPECTED_ARGUMENT', $tok);
             }
         }
-
-        // Required check
+        foreach ($this->args as $a) {
+            if ($a['kind'] !== 'option' || $m->hasValue($a['name'])) {
+                continue;
+            }
+            $fromEnv = $a['env'] !== null ? $env($a['env']) : null;
+            if ($fromEnv !== null) {
+                self::set($m, $a, $fromEnv, '--' . $a['name']);
+            } elseif ($a['default'] !== null) {
+                self::set($m, $a, $a['default'], '--' . $a['name']);
+            }
+        }
         foreach ($this->positionals as $p) {
-            if ($p['required'] && !$matches->hasValue($p['name'])) {
-                throw new ParseError('missing_required', "missing required argument: {$p['name']}");
+            if ($p['required'] && !$m->hasValue($p['name'])) {
+                throw new ParseError('MISSING_REQUIRED', $p['name']);
             }
         }
-
-        return $matches;
-    }
-
-    // ── Lookup helpers ──
-
-    /** @return array{name:string, help:string, short:?string}|null */
-    private function findFlag(string $name): ?array
-    {
-        foreach ($this->flags as $f) {
-            if ($f['name'] === $name) return $f;
-        }
-        return null;
-    }
-
-    /** @return array{name:string, help:string, short:?string}|null */
-    private function findFlagShort(string $ch): ?array
-    {
-        foreach ($this->flags as $f) {
-            if ($f['short'] === $ch) return $f;
-        }
-        return null;
-    }
-
-    /** @return array{name:string, help:string, argType:ArgType, short:?string, default:?string, envVar:?string}|null */
-    private function findOpt(string $name): ?array
-    {
-        foreach ($this->options as $o) {
-            if ($o['name'] === $name) return $o;
-        }
-        return null;
-    }
-
-    /** @return array{name:string, help:string, argType:ArgType, short:?string, default:?string, envVar:?string}|null */
-    private function findOptShort(string $ch): ?array
-    {
-        foreach ($this->options as $o) {
-            if ($o['short'] === $ch) return $o;
-        }
-        return null;
-    }
-
-    // ── Value parsing ──
-
-    private static function parseValue(string $name, string $raw, ArgType $type): Value
-    {
-        return match ($type) {
-            ArgType::STR => Value::str($raw),
-            ArgType::INT => self::parseInt($name, $raw),
-            ArgType::FLOAT => self::parseFloat($name, $raw),
-            ArgType::BOOL => self::parseBool($name, $raw),
-        };
-    }
-
-    private static function parseInt(string $name, string $raw): Value
-    {
-        if (!preg_match('/^-?\d+$/', $raw)) {
-            throw new ParseError('invalid_type', "invalid value '{$raw}' for {$name}");
-        }
-        return Value::int((int) $raw);
-    }
-
-    private static function parseFloat(string $name, string $raw): Value
-    {
-        if (!is_numeric($raw)) {
-            throw new ParseError('invalid_type', "invalid value '{$raw}' for {$name}");
-        }
-        return Value::float((float) $raw);
-    }
-
-    private static function parseBool(string $name, string $raw): Value
-    {
-        return match ($raw) {
-            'true', '1', 'yes', 'on' => Value::bool(true),
-            'false', '0', 'no', 'off' => Value::bool(false),
-            default => throw new ParseError('invalid_type', "invalid value '{$raw}' for {$name}"),
-        };
+        return $m;
     }
 }

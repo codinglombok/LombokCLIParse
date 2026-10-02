@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lombokcliparse"
+version = "0.2.0"
+description = "Command-line parser with flags, typed options, subcommands, environment fallback and generated help; identical behaviour and help text in Python, Rust, TypeScript, Go and PHP. Zero dependencies."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "codinglombok" }]
+requires-python = ">=3.9"
+keywords = ["cli", "argv", "argparse", "command-line", "subcommands"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/codinglombok/LombokCLIParse"
+Issues = "https://github.com/codinglombok/LombokCLIParse/issues"
+
+[tool.setuptools]
+packages = ["lombokcliparse"]
+
+[tool.setuptools.package-data]
+lombokcliparse = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

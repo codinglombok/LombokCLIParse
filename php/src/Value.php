@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace LombokCLIParse;
 
 /**
- * Holds a parsed argument value.
+ * A parsed value; `type` tells which field is set.
  */
 final class Value
 {

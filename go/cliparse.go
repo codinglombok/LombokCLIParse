@@ -1,506 +1,649 @@
-// Package lombokcliparse provides a lightweight CLI argument parser.
-//
-// Positional args, flags, options, subcommands, auto-help,
-// env fallback, type parsing. Zero dependencies.
+// Package lombokcliparse parses command lines: positional arguments, flags,
+// typed options, subcommands, environment fallback, and generated help. The
+// same input gives the same result, error message and help text in the Rust,
+// TypeScript, Python and PHP ports (docs/SPEC_LombokCLIParse_v0.2.0.md).
 package lombokcliparse
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
-// ArgType defines the type of an argument value.
-type ArgType int
+// ArgType is the type of a positional argument or option (SPEC section 3).
+type ArgType string
 
+// Argument types.
 const (
-	TypeStr   ArgType = iota
-	TypeInt
-	TypeBool
-	TypeFloat
+	TypeStr   ArgType = "string"
+	TypeInt   ArgType = "int"
+	TypeFloat ArgType = "float"
+	TypeBool  ArgType = "bool"
 )
 
-// Value holds a parsed argument value.
+// MaxSafeInteger is the largest value accepted by TypeInt (2^53 - 1).
+const MaxSafeInteger = 1<<53 - 1
+
+// Value is a parsed value; Type tells which field is set.
 type Value struct {
+	Type  ArgType
 	Str   string
 	Int   int64
 	Float float64
 	Bool  bool
-	Type  ArgType
 }
 
-// ParseError represents an argument parsing error.
+// ParseError reports why parsing stopped. HELP and VERSION are not failures:
+// Text holds what to print (use App.Run to handle them).
 type ParseError struct {
-	Kind    string
-	Message string
+	Code   string // e.g. "UNKNOWN_ARGUMENT", "HELP"
+	Arg    string // the argument concerned; "" for HELP and VERSION
+	Value  string // the rejected text for INVALID_VALUE
+	Reason string // the broken rule for INVALID_DEFINITION
+	Text   string // help or version text
 }
 
-func (e *ParseError) Error() string { return e.Message }
-
-type positional struct {
-	Name     string
-	Help     string
-	ArgType  ArgType
-	Required bool
-}
-
-type flag struct {
-	Name  string
-	Help  string
-	Short rune
-}
-
-type option struct {
-	Name    string
-	Help    string
-	ArgType ArgType
-	Short   rune
-	Default string
-	EnvVar  string
-}
-
-// Matches holds parsed argument results.
-type Matches struct {
-	values     map[string]Value
-	flags      map[string]bool
-	subcommand *struct {
-		Name    string
-		Matches *Matches
+// Error returns "CODE: message" (SPEC section 6), or the help/version text.
+func (e *ParseError) Error() string {
+	var m string
+	switch e.Code {
+	case "HELP", "VERSION":
+		return e.Text
+	case "UNKNOWN_ARGUMENT":
+		m = "unknown argument '" + e.Arg + "'"
+	case "MISSING_VALUE":
+		m = "missing value for '" + e.Arg + "'"
+	case "INVALID_VALUE":
+		m = "invalid value '" + e.Value + "' for '" + e.Arg + "'"
+	case "MISSING_REQUIRED":
+		m = "missing required argument '" + e.Arg + "'"
+	case "UNEXPECTED_ARGUMENT":
+		m = "unexpected argument '" + e.Arg + "'"
+	case "UNKNOWN_SUBCOMMAND":
+		m = "unknown subcommand '" + e.Arg + "'"
+	case "FLAG_TAKES_NO_VALUE":
+		m = "flag '" + e.Arg + "' does not take a value"
+	case "INVALID_DEFINITION":
+		m = e.Reason + ": '" + e.Arg + "'"
 	}
-	rest []string
+	return e.Code + ": " + m
 }
 
-// GetStr returns a string value by name.
+// IsInfo reports HELP and VERSION, which should exit with status 0.
+func (e *ParseError) IsInfo() bool { return e.Code == "HELP" || e.Code == "VERSION" }
+
+var (
+	intRE   = regexp.MustCompile(`^[+-]?[0-9]+$`)
+	floatRE = regexp.MustCompile(`^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
+	nameRE  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+	bools   = map[string]bool{"true": true, "1": true, "yes": true, "on": true, "false": false, "0": false, "no": false, "off": false}
+)
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// ParseValue parses raw as t; ok is false when the text is not valid for the type.
+func ParseValue(t ArgType, raw string) (v Value, ok bool) {
+	v.Type = t
+	switch t {
+	case TypeStr:
+		v.Str = raw
+		return v, true
+	case TypeInt:
+		if !intRE.MatchString(raw) || len(strings.TrimLeft(strings.TrimLeft(raw, "+-"), "0")) > 16 {
+			return v, false
+		}
+		n, err := strconv.ParseInt(strings.TrimPrefix(raw, "+"), 10, 64)
+		if err != nil || n > MaxSafeInteger || n < -MaxSafeInteger {
+			return v, false
+		}
+		v.Int = n
+		return v, true
+	case TypeFloat:
+		if !floatRE.MatchString(raw) {
+			return v, false
+		}
+		f, _ := strconv.ParseFloat(raw, 64) // ErrRange on overflow gives ±Inf, rejected below
+		if math.IsInf(f, 0) {
+			return v, false
+		}
+		v.Float = f
+		return v, true
+	case TypeBool:
+		if !isASCII(raw) {
+			return v, false
+		}
+		b, found := bools[strings.ToLower(raw)]
+		v.Bool = b
+		return v, found
+	}
+	return v, false
+}
+
+// Matches is the result of a successful parse.
+type Matches struct {
+	values  map[string]Value
+	flags   map[string]bool
+	subName string
+	sub     *Matches
+	rest    []string
+}
+
+func newMatches() *Matches {
+	return &Matches{values: map[string]Value{}, flags: map[string]bool{}, rest: []string{}}
+}
+
+// GetStr returns a string value.
 func (m *Matches) GetStr(name string) (string, bool) {
 	v, ok := m.values[name]
-	if !ok || v.Type != TypeStr {
-		return "", false
-	}
-	return v.Str, true
+	return v.Str, ok && v.Type == TypeStr
 }
 
-// GetInt returns an integer value by name.
+// GetInt returns an int value.
 func (m *Matches) GetInt(name string) (int64, bool) {
 	v, ok := m.values[name]
-	if !ok || v.Type != TypeInt {
-		return 0, false
-	}
-	return v.Int, true
+	return v.Int, ok && v.Type == TypeInt
 }
 
-// GetFloat returns a float value by name.
+// GetFloat returns a float value.
 func (m *Matches) GetFloat(name string) (float64, bool) {
 	v, ok := m.values[name]
-	if !ok || v.Type != TypeFloat {
-		return 0, false
-	}
-	return v.Float, true
+	return v.Float, ok && v.Type == TypeFloat
 }
 
-// GetBool returns whether a flag is set.
+// GetBool reports whether the flag was given or a bool option is true.
 func (m *Matches) GetBool(name string) bool {
-	return m.flags[name]
+	v, ok := m.values[name]
+	return m.flags[name] || (ok && v.Type == TypeBool && v.Bool)
 }
 
-// Get returns the raw Value.
+// Get returns any value by name.
 func (m *Matches) Get(name string) (Value, bool) {
 	v, ok := m.values[name]
 	return v, ok
 }
 
-// Subcommand returns the matched subcommand name and matches.
+// Names returns the names of all values, sorted.
+func (m *Matches) Names() []string {
+	out := make([]string, 0, len(m.values))
+	for k := range m.values {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Flags returns the names of the flags that were given, sorted.
+func (m *Matches) Flags() []string {
+	out := make([]string, 0, len(m.flags))
+	for k := range m.flags {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Subcommand returns the selected subcommand and its matches.
 func (m *Matches) Subcommand() (string, *Matches, bool) {
-	if m.subcommand == nil {
-		return "", nil, false
-	}
-	return m.subcommand.Name, m.subcommand.Matches, true
+	return m.subName, m.sub, m.sub != nil
 }
 
-// Rest returns remaining args after --.
-func (m *Matches) Rest() []string {
-	return m.rest
+// Rest returns tokens after "--" that did not fill a positional argument.
+func (m *Matches) Rest() []string { return m.rest }
+
+type positional struct {
+	name, help string
+	t          ArgType
+	required   bool
 }
 
-// App is the CLI application builder.
+type named struct {
+	isFlag             bool
+	name, help         string
+	short              rune // 0 = none
+	t                  ArgType
+	def, env           string
+	hasDefault, hasEnv bool
+}
+
+// App is a command-line application or subcommand definition (builder).
 type App struct {
-	name        string
-	description string
-	version     string
-	positionals []positional
-	flags       []flag
-	options     []option
-	subcommands map[string]*App
+	name, description string
+	version           string
+	hasVersion        bool
+	positionals       []positional
+	args              []named
+	subs              []*App
 }
 
-// NewApp creates a new CLI app.
-func NewApp(name, description string) *App {
-	return &App{
-		name:        name,
-		description: description,
-		subcommands: make(map[string]*App),
-	}
-}
+// NewApp creates an app; description may be empty.
+func NewApp(name, description string) *App { return &App{name: name, description: description} }
 
-// Version sets the version string.
+// Version sets the version and enables --version.
 func (a *App) Version(v string) *App {
-	a.version = v
+	a.version, a.hasVersion = v, true
 	return a
 }
 
-// Positional adds a positional argument.
-func (a *App) Positional(name, help string, argType ArgType, required bool) *App {
-	a.positionals = append(a.positionals, positional{name, help, argType, required})
+// Positional adds a positional argument (filled in definition order).
+func (a *App) Positional(name, help string, t ArgType, required bool) *App {
+	a.positionals = append(a.positionals, positional{name, help, t, required})
 	return a
 }
 
-// Flag adds a boolean flag.
+// Flag adds a boolean flag; short 0 means none.
 func (a *App) Flag(name, help string, short rune) *App {
-	a.flags = append(a.flags, flag{name, help, short})
+	a.args = append(a.args, named{isFlag: true, name: name, help: help, short: short})
 	return a
 }
 
-// Option adds a key-value option.
-func (a *App) Option(name, help string, argType ArgType, short rune, defaultVal, envVar string) *App {
-	a.options = append(a.options, option{name, help, argType, short, defaultVal, envVar})
+// Option adds an option taking a value; short 0 means none, and an empty
+// defaultVal or envVar means none (use OptionFull for an empty default).
+func (a *App) Option(name, help string, t ArgType, short rune, defaultVal, envVar string) *App {
+	return a.OptionFull(name, help, t, short, defaultVal, defaultVal != "", envVar, envVar != "")
+}
+
+// OptionFull is Option with explicit presence of the default and env variable.
+func (a *App) OptionFull(name, help string, t ArgType, short rune, def string, hasDefault bool, env string, hasEnv bool) *App {
+	a.args = append(a.args, named{name: name, help: help, short: short, t: t, def: def, hasDefault: hasDefault, env: env, hasEnv: hasEnv})
 	return a
 }
 
-// Sub adds a subcommand.
+// Sub adds a subcommand. An app with subcommands has no positional arguments.
 func (a *App) Sub(sub *App) *App {
-	a.subcommands[sub.name] = sub
+	a.subs = append(a.subs, sub)
 	return a
 }
 
-// Help generates the help text.
-func (a *App) Help() string {
-	var b strings.Builder
-	b.WriteString(a.name)
-	if a.version != "" {
-		b.WriteString(" " + a.version)
-	}
-	b.WriteString("\n" + a.description + "\n\n")
+// Subcommand is the same as Sub.
+func (a *App) Subcommand(sub *App) *App { return a.Sub(sub) }
 
-	b.WriteString("USAGE:\n    " + a.name)
-	if len(a.subcommands) > 0 {
-		b.WriteString(" <COMMAND>")
-	}
-	if len(a.options) > 0 || len(a.flags) > 0 {
-		b.WriteString(" [OPTIONS]")
+func defErr(arg, reason string) *ParseError {
+	return &ParseError{Code: "INVALID_DEFINITION", Arg: arg, Reason: reason}
+}
+
+// Validate checks the rules of SPEC section 2.
+func (a *App) Validate() error {
+	names := map[string]bool{}
+	shorts := map[rune]bool{}
+	check := func(n string) error {
+		switch {
+		case !nameRE.MatchString(n):
+			return defErr(n, "invalid name")
+		case n == "help" || (n == "version" && a.hasVersion):
+			return defErr(n, "reserved name")
+		case names[n]:
+			return defErr(n, "duplicate name")
+		}
+		names[n] = true
+		return nil
 	}
 	for _, p := range a.positionals {
-		if p.Required {
-			b.WriteString(fmt.Sprintf(" <%s>", strings.ToUpper(p.Name)))
+		if err := check(p.name); err != nil {
+			return err
+		}
+	}
+	for _, x := range a.args {
+		if err := check(x.name); err != nil {
+			return err
+		}
+		if x.short != 0 {
+			if !(x.short >= 'a' && x.short <= 'z' || x.short >= 'A' && x.short <= 'Z') {
+				return defErr(string(x.short), "invalid short")
+			}
+			if shorts[x.short] {
+				return defErr(string(x.short), "duplicate short")
+			}
+			shorts[x.short] = true
+		}
+		if !x.isFlag && x.hasDefault {
+			if _, ok := ParseValue(x.t, x.def); !ok {
+				return defErr(x.name, "invalid default")
+			}
+		}
+	}
+	seenOptional := false
+	for _, p := range a.positionals {
+		if p.required && seenOptional {
+			return defErr(p.name, "required after optional")
+		}
+		seenOptional = seenOptional || !p.required
+	}
+	if len(a.subs) > 0 && len(a.positionals) > 0 {
+		return defErr(a.subs[0].name, "positionals with subcommands")
+	}
+	subNames := map[string]bool{}
+	for _, s := range a.subs {
+		if !nameRE.MatchString(s.name) {
+			return defErr(s.name, "invalid name")
+		}
+		if subNames[s.name] {
+			return defErr(s.name, "duplicate name")
+		}
+		subNames[s.name] = true
+		if err := s.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func joinParts(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+func section(b *strings.Builder, title string, rows [][2]string) {
+	width := 0
+	for _, r := range rows {
+		if n := utf8.RuneCountInString(r[0]); n > width {
+			width = n
+		}
+	}
+	b.WriteString(title + ":\n")
+	for _, r := range rows {
+		b.WriteString("    " + r[0])
+		if r[1] != "" {
+			b.WriteString(strings.Repeat(" ", width-utf8.RuneCountInString(r[0])+2) + r[1])
+		}
+		b.WriteString("\n")
+	}
+}
+
+var placeholder = map[ArgType]string{TypeStr: "<VALUE>", TypeInt: "<INT>", TypeFloat: "<FLOAT>", TypeBool: "<BOOL>"}
+
+// Help returns the help text (SPEC section 5) as shown for --help.
+func (a *App) Help() string { return a.helpAt(a.name) }
+
+func (a *App) helpAt(path string) string {
+	var b strings.Builder
+	b.WriteString(a.name)
+	if a.hasVersion {
+		b.WriteString(" " + a.version)
+	}
+	b.WriteString("\n")
+	if a.description != "" {
+		b.WriteString(a.description + "\n")
+	}
+	b.WriteString("\nUSAGE:\n    " + path + " [OPTIONS]")
+	if len(a.subs) > 0 {
+		b.WriteString(" <COMMAND>")
+	}
+	for _, p := range a.positionals {
+		n := strings.ToUpper(p.name)
+		if p.required {
+			b.WriteString(" <" + n + ">")
 		} else {
-			b.WriteString(fmt.Sprintf(" [%s]", strings.ToUpper(p.Name)))
+			b.WriteString(" [" + n + "]")
 		}
 	}
-	b.WriteString("\n\n")
-
+	b.WriteString("\n")
 	if len(a.positionals) > 0 {
-		b.WriteString("ARGS:\n")
-		for _, p := range a.positionals {
+		rows := make([][2]string, len(a.positionals))
+		for i, p := range a.positionals {
 			req := ""
-			if p.Required {
-				req = " (required)"
+			if p.required {
+				req = "(required)"
 			}
-			b.WriteString(fmt.Sprintf("    <%s>    %s%s\n", strings.ToUpper(p.Name), p.Help, req))
+			rows[i] = [2]string{"<" + strings.ToUpper(p.name) + ">", joinParts(p.help, req)}
 		}
 		b.WriteString("\n")
+		section(&b, "ARGS", rows)
 	}
-
-	if len(a.subcommands) > 0 {
-		b.WriteString("COMMANDS:\n")
-		names := make([]string, 0, len(a.subcommands))
-		for n := range a.subcommands {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		for _, n := range names {
-			sub := a.subcommands[n]
-			b.WriteString(fmt.Sprintf("    %-16s%s\n", n, sub.description))
+	if len(a.subs) > 0 {
+		rows := make([][2]string, len(a.subs))
+		for i, s := range a.subs {
+			rows[i] = [2]string{s.name, s.description}
 		}
 		b.WriteString("\n")
+		section(&b, "COMMANDS", rows)
 	}
-
-	if len(a.flags) > 0 || len(a.options) > 0 {
-		b.WriteString("OPTIONS:\n")
-		for _, f := range a.flags {
-			s := "    "
-			if f.Short != 0 {
-				s = fmt.Sprintf("-%c, ", f.Short)
-			}
-			b.WriteString(fmt.Sprintf("    %s--%-16s%s\n", s, f.Name, f.Help))
+	rows := make([][2]string, 0, len(a.args)+2)
+	for _, x := range a.args {
+		left := "    --" + x.name
+		if x.short != 0 {
+			left = "-" + string(x.short) + ", --" + x.name
 		}
-		for _, o := range a.options {
-			s := "    "
-			if o.Short != 0 {
-				s = fmt.Sprintf("-%c, ", o.Short)
-			}
-			def := ""
-			if o.Default != "" {
-				def = fmt.Sprintf(" [default: %s]", o.Default)
-			}
-			env := ""
-			if o.EnvVar != "" {
-				env = fmt.Sprintf(" [env: %s]", o.EnvVar)
-			}
-			b.WriteString(fmt.Sprintf("    %s--%-16s%s%s%s\n", s, o.Name, o.Help, def, env))
+		if x.isFlag {
+			rows = append(rows, [2]string{left, x.help})
+			continue
 		}
-		b.WriteString("        --help            Show this help message\n")
+		d, e := "", ""
+		if x.hasDefault {
+			d = "[default: " + x.def + "]"
+		}
+		if x.hasEnv {
+			e = "[env: " + x.env + "]"
+		}
+		rows = append(rows, [2]string{left + " " + placeholder[x.t], joinParts(x.help, d, e)})
 	}
-
+	rows = append(rows, [2]string{"    --help", "Print help"})
+	if a.hasVersion {
+		rows = append(rows, [2]string{"    --version", "Print version"})
+	}
+	b.WriteString("\n")
+	section(&b, "OPTIONS", rows)
 	return b.String()
 }
 
-// Parse parses args (first element = program name, skipped).
+// EnvLookup returns an environment variable and whether it is set.
+type EnvLookup func(name string) (string, bool)
+
+// Parse parses a full command line (args[0] is the program name) with the
+// process environment for fallback values.
 func (a *App) Parse(args []string) (*Matches, error) {
-	if len(args) == 0 {
-		return a.parseSlice(nil)
+	if len(args) > 0 {
+		args = args[1:]
 	}
-	return a.parseSlice(args[1:])
+	return a.ParseWithEnv(args, os.LookupEnv)
 }
 
-// ParseEnv parses from os.Args.
-func (a *App) ParseEnv() (*Matches, error) {
-	return a.Parse(os.Args)
-}
-
-func (a *App) parseSlice(args []string) (*Matches, error) {
-	m := &Matches{
-		values: make(map[string]Value),
-		flags:  make(map[string]bool),
+// ParseWithEnv parses tokens (without the program name) with an explicit
+// environment lookup; nil means no environment.
+func (a *App) ParseWithEnv(tokens []string, env EnvLookup) (*Matches, error) {
+	if err := a.Validate(); err != nil {
+		return nil, err
 	}
-	posIdx := 0
-	i := 0
-	afterDD := false
-
-	for i < len(args) {
-		arg := args[i]
-
-		if afterDD {
-			m.rest = append(m.rest, arg)
-			i++
-			continue
-		}
-
-		if arg == "--" {
-			afterDD = true
-			i++
-			continue
-		}
-
-		// --name=value or --name value
-		if strings.HasPrefix(arg, "--") {
-			rest := arg[2:]
-			if rest == "help" {
-				fmt.Print(a.Help())
-				os.Exit(0)
-			}
-
-			var name, inlineVal string
-			hasInline := false
-			if eq := strings.Index(rest, "="); eq != -1 {
-				name = rest[:eq]
-				inlineVal = rest[eq+1:]
-				hasInline = true
-			} else {
-				name = rest
-			}
-
-			// Flag?
-			if fd := a.findFlag(name); fd != nil {
-				m.flags[name] = true
-				i++
-				continue
-			}
-
-			// Option?
-			if od := a.findOpt(name); od != nil {
-				var valStr string
-				if hasInline {
-					valStr = inlineVal
-				} else {
-					i++
-					if i >= len(args) {
-						return nil, &ParseError{"missing_value", fmt.Sprintf("missing value for: --%s", name)}
-					}
-					valStr = args[i]
-				}
-				v, err := parseValue(od.Name, valStr, od.ArgType)
-				if err != nil {
-					return nil, err
-				}
-				m.values[od.Name] = v
-				i++
-				continue
-			}
-
-			return nil, &ParseError{"unknown_arg", fmt.Sprintf("unknown argument: --%s", name)}
-		}
-
-		// Short: -v, -p value, -vn
-		if strings.HasPrefix(arg, "-") && len(arg) > 1 {
-			chars := []rune(arg[1:])
-			ci := 0
-			for ci < len(chars) {
-				ch := chars[ci]
-
-				if fd := a.findFlagShort(ch); fd != nil {
-					m.flags[fd.Name] = true
-					ci++
-					continue
-				}
-
-				if od := a.findOptShort(ch); od != nil {
-					var valStr string
-					if ci+1 < len(chars) {
-						valStr = string(chars[ci+1:])
-					} else {
-						i++
-						if i >= len(args) {
-							return nil, &ParseError{"missing_value", fmt.Sprintf("missing value for: %s", od.Name)}
-						}
-						valStr = args[i]
-					}
-					v, err := parseValue(od.Name, valStr, od.ArgType)
-					if err != nil {
-						return nil, err
-					}
-					m.values[od.Name] = v
-					goto nextArg
-				}
-
-				return nil, &ParseError{"unknown_arg", fmt.Sprintf("unknown argument: -%c", ch)}
-			}
-		nextArg:
-			i++
-			continue
-		}
-
-		// Subcommand?
-		if posIdx == 0 {
-			if sub, ok := a.subcommands[arg]; ok {
-				subM, err := sub.parseSlice(args[i+1:])
-				if err != nil {
-					return nil, err
-				}
-				m.subcommand = &struct {
-					Name    string
-					Matches *Matches
-				}{arg, subM}
-				return m, nil
-			}
-		}
-
-		// Positional
-		if posIdx < len(a.positionals) {
-			p := a.positionals[posIdx]
-			v, err := parseValue(p.Name, arg, p.ArgType)
-			if err != nil {
-				return nil, err
-			}
-			m.values[p.Name] = v
-			posIdx++
-		} else {
-			m.rest = append(m.rest, arg)
-		}
-
-		i++
+	if env == nil {
+		env = func(string) (string, bool) { return "", false }
 	}
-
-	// Defaults and env vars
-	for _, o := range a.options {
-		if _, exists := m.values[o.Name]; !exists {
-			if o.EnvVar != "" {
-				if envVal, ok := os.LookupEnv(o.EnvVar); ok {
-					if v, err := parseValue(o.Name, envVal, o.ArgType); err == nil {
-						m.values[o.Name] = v
-						continue
-					}
-				}
-			}
-			if o.Default != "" {
-				if v, err := parseValue(o.Name, o.Default, o.ArgType); err == nil {
-					m.values[o.Name] = v
-				}
-			}
-		}
+	m, err := a.parseTokens(tokens, env, a.name)
+	if err != nil {
+		return nil, err
 	}
-
-	// Required check
-	for _, p := range a.positionals {
-		if p.Required {
-			if _, exists := m.values[p.Name]; !exists {
-				return nil, &ParseError{"missing_required", fmt.Sprintf("missing required argument: %s", p.Name)}
-			}
-		}
-	}
-
 	return m, nil
 }
 
-func (a *App) findFlag(name string) *flag {
-	for i := range a.flags {
-		if a.flags[i].Name == name {
-			return &a.flags[i]
+// ParseEnv parses os.Args.
+func (a *App) ParseEnv() (*Matches, error) { return a.Parse(os.Args) }
+
+// Run parses os.Args; it prints help or version and exits with 0, or prints
+// the error and exits with 2.
+func (a *App) Run() *Matches {
+	m, err := a.ParseEnv()
+	if err == nil {
+		return m
+	}
+	if pe, ok := err.(*ParseError); ok && pe.IsInfo() {
+		fmt.Print(pe.Text)
+		os.Exit(0)
+	}
+	fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	os.Exit(2)
+	return nil
+}
+
+func (a *App) set(m *Matches, x *named, raw, arg string) error {
+	v, ok := ParseValue(x.t, raw)
+	if !ok {
+		return &ParseError{Code: "INVALID_VALUE", Arg: arg, Value: raw}
+	}
+	m.values[x.name] = v
+	return nil
+}
+
+func (a *App) findLong(name string) *named {
+	for i := range a.args {
+		if a.args[i].name == name {
+			return &a.args[i]
 		}
 	}
 	return nil
 }
 
-func (a *App) findFlagShort(ch rune) *flag {
-	for i := range a.flags {
-		if a.flags[i].Short == ch {
-			return &a.flags[i]
+func (a *App) findShort(c rune) *named {
+	for i := range a.args {
+		if a.args[i].short == c {
+			return &a.args[i]
 		}
 	}
 	return nil
 }
 
-func (a *App) findOpt(name string) *option {
-	for i := range a.options {
-		if a.options[i].Name == name {
-			return &a.options[i]
+func (a *App) parseTokens(tokens []string, env EnvLookup, path string) (*Matches, error) {
+	m := newMatches()
+	posIdx, i, afterDD := 0, 0, false
+	for i < len(tokens) {
+		tok := tokens[i]
+		i++
+		if !afterDD {
+			if tok == "--" {
+				afterDD = true
+				continue
+			}
+			if tok == "--help" {
+				return nil, &ParseError{Code: "HELP", Text: a.helpAt(path)}
+			}
+			if tok == "--version" && a.hasVersion {
+				return nil, &ParseError{Code: "VERSION", Text: a.name + " " + a.version + "\n"}
+			}
+			if strings.HasPrefix(tok, "--") {
+				name, inline, hasInline := strings.Cut(tok[2:], "=")
+				arg := "--" + name
+				x := a.findLong(name)
+				if x == nil {
+					return nil, &ParseError{Code: "UNKNOWN_ARGUMENT", Arg: arg}
+				}
+				if x.isFlag {
+					if hasInline {
+						return nil, &ParseError{Code: "FLAG_TAKES_NO_VALUE", Arg: arg}
+					}
+					m.flags[x.name] = true
+					continue
+				}
+				if !hasInline {
+					if i >= len(tokens) {
+						return nil, &ParseError{Code: "MISSING_VALUE", Arg: arg}
+					}
+					inline = tokens[i]
+					i++
+				}
+				if err := a.set(m, x, inline, arg); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if len(tok) > 1 && tok[0] == '-' && !strings.ContainsRune("0123456789.", rune(tok[1])) {
+				cluster := []rune(tok[1:])
+				for k := 0; k < len(cluster); k++ {
+					c := cluster[k]
+					arg := "-" + string(c)
+					x := a.findShort(c)
+					if x == nil {
+						return nil, &ParseError{Code: "UNKNOWN_ARGUMENT", Arg: arg}
+					}
+					if x.isFlag {
+						m.flags[x.name] = true
+						continue
+					}
+					raw := string(cluster[k+1:])
+					if strings.HasPrefix(raw, "=") {
+						raw = raw[1:]
+					} else if raw == "" {
+						if i >= len(tokens) {
+							return nil, &ParseError{Code: "MISSING_VALUE", Arg: arg}
+						}
+						raw = tokens[i]
+						i++
+					}
+					if err := a.set(m, x, raw, arg); err != nil {
+						return nil, err
+					}
+					break
+				}
+				continue
+			}
+		}
+		if !afterDD && len(a.subs) > 0 {
+			var sub *App
+			for _, s := range a.subs {
+				if s.name == tok {
+					sub = s
+				}
+			}
+			if sub == nil {
+				return nil, &ParseError{Code: "UNKNOWN_SUBCOMMAND", Arg: tok}
+			}
+			sm, err := sub.parseTokens(tokens[i:], env, path+" "+tok)
+			if err != nil {
+				return nil, err
+			}
+			m.subName, m.sub = tok, sm
+			break
+		}
+		if posIdx < len(a.positionals) {
+			p := a.positionals[posIdx]
+			v, ok := ParseValue(p.t, tok)
+			if !ok {
+				return nil, &ParseError{Code: "INVALID_VALUE", Arg: p.name, Value: tok}
+			}
+			m.values[p.name] = v
+			posIdx++
+		} else if afterDD {
+			m.rest = append(m.rest, tok)
+		} else {
+			return nil, &ParseError{Code: "UNEXPECTED_ARGUMENT", Arg: tok}
 		}
 	}
-	return nil
-}
-
-func (a *App) findOptShort(ch rune) *option {
-	for i := range a.options {
-		if a.options[i].Short == ch {
-			return &a.options[i]
+	for idx := range a.args {
+		x := &a.args[idx]
+		if x.isFlag {
+			continue
+		}
+		if _, set := m.values[x.name]; set {
+			continue
+		}
+		arg := "--" + x.name
+		if v, ok := env(x.env); x.hasEnv && ok {
+			if err := a.set(m, x, v, arg); err != nil {
+				return nil, err
+			}
+		} else if x.hasDefault {
+			if err := a.set(m, x, x.def, arg); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return nil
-}
-
-func parseValue(name, raw string, ty ArgType) (Value, error) {
-	switch ty {
-	case TypeStr:
-		return Value{Str: raw, Type: TypeStr}, nil
-	case TypeInt:
-		n, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return Value{}, &ParseError{"invalid_type", fmt.Sprintf("invalid value '%s' for %s", raw, name)}
+	for _, p := range a.positionals {
+		if _, ok := m.values[p.name]; p.required && !ok {
+			return nil, &ParseError{Code: "MISSING_REQUIRED", Arg: p.name}
 		}
-		return Value{Int: n, Type: TypeInt}, nil
-	case TypeFloat:
-		f, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return Value{}, &ParseError{"invalid_type", fmt.Sprintf("invalid value '%s' for %s", raw, name)}
-		}
-		return Value{Float: f, Type: TypeFloat}, nil
-	case TypeBool:
-		switch raw {
-		case "true", "1", "yes", "on":
-			return Value{Bool: true, Type: TypeBool}, nil
-		case "false", "0", "no", "off":
-			return Value{Bool: false, Type: TypeBool}, nil
-		}
-		return Value{}, &ParseError{"invalid_type", fmt.Sprintf("invalid value '%s' for %s", raw, name)}
 	}
-	return Value{}, &ParseError{"invalid_type", "unknown type"}
+	return m, nil
 }

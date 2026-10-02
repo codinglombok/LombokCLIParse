@@ -1,13 +1,20 @@
 [package]
 name = "lombokcliparse"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Lightweight CLI argument parser — positional args, flags, options, subcommands, auto-help"
+rust-version = "1.70"
 license = "Apache-2.0"
+description = "Command-line parser with flags, typed options, subcommands, environment fallback and generated help; identical behaviour and help text in Rust, TypeScript, Python, Go and PHP. No dependencies."
 repository = "https://github.com/codinglombok/LombokCLIParse"
-keywords = ["cli", "parser", "args", "command-line"]
-categories = ["command-line-interface"]
+readme = "README.md"
+keywords = ["cli", "parser", "args", "command-line", "no-std"]
+categories = ["command-line-interface", "no-std"]
+exclude = ["target/"]
 
 [features]
 default = ["std"]
+# process environment, std::error::Error, App::run and App::parse_env
 std = []
+
+[dev-dependencies]
+serde_json = "1"
