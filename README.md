@@ -1,65 +1,61 @@
 # LombokCLIParse
 
-**Lightweight CLI argument parser** — positional args, flags, options, subcommands, auto-help, env fallback, type parsing. Zero dependencies.
+> Command-line parser with positional arguments, flags, typed options, subcommands, environment fallback, and generated help. The same command line gives the same result, error message, and help text in Rust, TypeScript, Python, Go, and PHP. Zero runtime dependencies.
 
-Part of the [LombokRAGFrameworks](https://github.com/codinglombok) ecosystem (I8 — Infrastructure Layer).
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/codinglombok/LombokCLIParse/actions/workflows/ci.yml/badge.svg)](https://github.com/codinglombok/LombokCLIParse/actions/workflows/ci.yml)
+[![Vectors](https://img.shields.io/badge/shared%20vectors-134%20x%205%20ports-success)](vectors/)
+[![Lombok Ecosystem](https://img.shields.io/badge/Lombok-Ecosystem-2e7d5b?logo=github)](https://github.com/codinglombok)
 
-## Features
+Part of the [Lombok Ecosystem](https://github.com/codinglombok).
 
-- **Positional arguments** — required & optional, with type parsing
-- **Boolean flags** — `--verbose`, `-v`, combined `-vn`
-- **Key-value options** — `--port 8080`, `--port=8080`, `-p 8080`
-- **Subcommands** — nested command trees with independent args
-- **Auto-help** — `--help` generates formatted usage text
-- **Environment variable fallback** — options read from env when not provided
-- **Type parsing** — string, int, float, bool with error reporting
-- **Builder pattern** — fluent API across all languages
-- **Zero dependencies** — stdlib only in every language
+## Mengapa library ini? (Why this library?)
 
-## Languages
+- **One behaviour, five languages.** A tool rewritten from Python to Go, or shipped as both an npm CLI and a Rust binary, accepts exactly the same command lines and prints the same help and errors. The rules are written down ([SPEC](docs/SPEC_LombokCLIParse_v0.2.0.md)) and 134 shared cases, including help text byte for byte, run in CI for every port.
+- **Predictable edge cases.** Negative numbers are values, not options; `--name value` takes the next token verbatim; `--` ends options; `-p=3000`, `-p3000` and `-vp 3000` all work; `--flag=x` is an error instead of being ignored.
+- **Library-friendly.** Parsing never prints or exits: `--help` and `--version` come back as results, errors carry a stable code, the argument, and the rejected value. `run()` gives the usual CLI behaviour (exit 0 for help, 2 for errors) when you want it.
+- **Strict, shared value grammar.** Integers within ±(2^53 − 1), decimal floats, and `true/false/yes/no/on/off/1/0` booleans are parsed the same way everywhere, not by each language's lenient built-ins.
 
-| Language   | Package                         | Min Version |
-|------------|---------------------------------|-------------|
-| Rust       | `lombokcliparse`                | 1.56+       |
-| TypeScript | `lombokcliparse`                | ES2022      |
-| Python     | `lombokcliparse`                | 3.8+        |
-| Go         | `github.com/codinglombok/LombokCLIParse/go` | 1.21+ |
-| PHP        | `codinglombok/lombokcliparse`   | 8.1+        |
+## Installation
 
-## Quick Start
+| Language | Package | Status |
+|---|---|---|
+| Rust | `lombokcliparse` (crates.io) | not yet published |
+| TypeScript / JavaScript | `lombokcliparse` (npm) | not yet published |
+| Python | `lombokcliparse` (PyPI) | not yet published |
+| Go | `github.com/codinglombok/lombokcliparse/go` | tag `go/v0.2.0` on release |
+| PHP | `codinglombok/lombokcliparse` (Packagist) | needs a split repository first |
+
+## Quick start
 
 ### Rust
 
 ```rust
 use lombokcliparse::{App, ArgType};
 
-let matches = App::new("myapp", "My application")
+let app = App::new("myapp", "My application")
     .version("1.0.0")
     .positional("input", "Input file", ArgType::Str, true)
-    .flag("verbose", "Enable verbose", Some('v'))
-    .option("port", "Port", ArgType::Int, Some('p'), Some("8080"), None)
-    .parse_from(&["myapp", "data.txt", "--verbose", "-p", "3000"])?;
+    .flag("verbose", "Verbose output", Some('v'))
+    .option("port", "Port", ArgType::Int, Some('p'), Some("8080"), Some("MYAPP_PORT"));
 
-let input = matches.get_str("input").unwrap();
-let port = matches.get_int("port").unwrap();
-let verbose = matches.get_bool("verbose");
+let m = app.run(); // prints help/version and exits 0, or an error and exits 2
+let port = m.get_int("port").unwrap();
 ```
 
 ### TypeScript
 
-```typescript
-import { App, ArgType } from 'lombokcliparse';
+```ts
+import { App, ArgType, ParseError } from 'lombokcliparse';
 
-const matches = new App('myapp', 'My application')
+const app = new App('myapp', 'My application')
     .version('1.0.0')
     .positional('input', 'Input file', ArgType.Str, true)
-    .flag('verbose', 'Enable verbose', 'v')
-    .option('port', 'Port', ArgType.Int, 'p', '8080')
-    .parse(['myapp', 'data.txt', '--verbose', '-p', '3000']);
+    .flag('verbose', 'Verbose output', 'v')
+    .option('port', 'Port', ArgType.Int, 'p', '8080');
 
-const input = matches.getStr('input');
-const port = matches.getInt('port');
-const verbose = matches.getBool('verbose');
+const m = app.run();               // or app.parse(process.argv.slice(1)) and catch ParseError
+m.getInt('port');                  // 8080
 ```
 
 ### Python
@@ -67,33 +63,25 @@ const verbose = matches.getBool('verbose');
 ```python
 from lombokcliparse import App, ArgType
 
-matches = (App("myapp", "My application")
-    .version("1.0.0")
-    .positional("input", "Input file", ArgType.STR, required=True)
-    .flag("verbose", "Enable verbose", short="v")
-    .option("port", "Port", ArgType.INT, short="p", default="8080")
-    .parse(["myapp", "data.txt", "--verbose", "-p", "3000"]))
-
-input_file = matches.get_str("input")
-port = matches.get_int("port")
-verbose = matches.get_bool("verbose")
+app = (App("myapp", "My application").version("1.0.0")
+       .positional("input", "Input file", ArgType.STR, required=True)
+       .flag("verbose", "Verbose output", short="v")
+       .option("port", "Port", ArgType.INT, short="p", default="8080"))
+m = app.run()
+m.get_int("port")
 ```
 
 ### Go
 
 ```go
-import cli "github.com/codinglombok/LombokCLIParse/go"
+import cli "github.com/codinglombok/lombokcliparse/go"
 
-app := cli.NewApp("myapp", "My application").
-    Version("1.0.0").
+app := cli.NewApp("myapp", "My application").Version("1.0.0").
     Positional("input", "Input file", cli.TypeStr, true).
-    Flag("verbose", "Enable verbose", 'v').
+    Flag("verbose", "Verbose output", 'v').
     Option("port", "Port", cli.TypeInt, 'p', "8080", "")
-
-matches, err := app.Parse(os.Args)
-input, _ := matches.GetStr("input")
-port, _ := matches.GetInt("port")
-verbose := matches.GetBool("verbose")
+m := app.Run()
+port, _ := m.GetInt("port")
 ```
 
 ### PHP
@@ -102,84 +90,66 @@ verbose := matches.GetBool("verbose")
 use LombokCLIParse\App;
 use LombokCLIParse\ArgType;
 
-$matches = (new App('myapp', 'My application'))
-    ->version('1.0.0')
-    ->positional('input', 'Input file', ArgType::STR, required: true)
-    ->flag('verbose', 'Enable verbose', short: 'v')
-    ->option('port', 'Port', ArgType::INT, short: 'p', default: '8080')
-    ->parse(['myapp', 'data.txt', '--verbose', '-p', '3000']);
+$m = (new App('myapp', 'My application'))->version('1.0.0')
+    ->positional('input', 'Input file', ArgType::STR, true)
+    ->flag('verbose', 'Verbose output', 'v')
+    ->option('port', 'Port', ArgType::INT, 'p', '8080')
+    ->run();
+$m->getInt('port');
+```
 
-$input = $matches->getStr('input');
-$port = $matches->getInt('port');
-$verbose = $matches->getBool('verbose');
+### Generated help
+
+```
+myapp 1.0.0
+My application
+
+USAGE:
+    myapp [OPTIONS] <INPUT>
+
+ARGS:
+    <INPUT>  Input file (required)
+
+OPTIONS:
+    -v, --verbose     Verbose output
+    -p, --port <INT>  Port [default: 8080]
+        --help        Print help
+        --version     Print version
 ```
 
 ## Subcommands
 
 ```rust
-let app = App::new("cli", "CLI tool")
+let app = App::new("cli", "Data tool")
     .flag("verbose", "Verbose", Some('v'))
-    .subcommand(
-        App::new("ingest", "Ingest data")
-            .positional("path", "Data path", ArgType::Str, true)
-            .flag("force", "Force overwrite", Some('f'))
-    )
-    .subcommand(
-        App::new("query", "Query data")
-            .positional("text", "Query text", ArgType::Str, true)
-            .option("limit", "Result limit", ArgType::Int, Some('l'), Some("10"), None)
-    );
+    .subcommand(App::new("ingest", "Ingest data").positional("path", "Data path", ArgType::Str, true))
+    .subcommand(App::new("query", "Query data").positional("text", "Query text", ArgType::Str, true));
 
-let matches = app.parse_from(&["cli", "ingest", "data/", "--force"])?;
-if let Some((name, sub)) = matches.subcommand() {
-    // name = "ingest", sub has the subcommand's matches
-}
+let m = app.parse_from(&["cli", "-v", "ingest", "data/"])?;
+if let Some(("ingest", sub)) = m.subcommand() { /* sub.get_str("path") */ }
 ```
 
-## Auto-Help
+Options of the parent come before the subcommand name; `cli query --help` shows help for `cli query`.
 
-Pass `--help` to any app to get formatted usage:
+## Known limitations
 
-```
-testapp 0.1.0
-A test application
+No option groups or mutually exclusive options, no repeated-option lists (the last value wins), no counted flags (`-vvv`), no shell completion, no localized messages yet. See [docs/full_summary_project_LombokCLIParse_v0.2.0.md](docs/full_summary_project_LombokCLIParse_v0.2.0.md#2-batasan-yang-diketahui).
 
-USAGE:
-    testapp [OPTIONS] <INPUT> [OUTPUT]
+## Upgrading from 0.1.0
 
-ARGS:
-    <INPUT>    Input file (required)
-    <OUTPUT>   Output file
+`--help` no longer exits the process from inside the library, negative numbers are values, invalid defaults and environment values are errors, extra positional arguments are errors unless they follow `--`, and the Go module path is now lowercase. See [CHANGELOG.md](CHANGELOG.md).
 
-OPTIONS:
-    -v, --verbose         Verbose output
-    -n, --dry-run         Dry run mode
-    -p, --port            Port number [default: 8080]
-    -h, --host            Hostname [default: localhost]
-    -c, --config          Config path [env: TEST_CONFIG]
-    -r, --rate            Rate limit
-        --help            Show this help message
-```
-
-## Testing
+## Development
 
 ```bash
-# Rust
-cd rust && cargo test
-
-# TypeScript
-cd typescript && npx tsx src/test.ts
-
-# Python
-cd python && python tests/test_smoke.py
-
-# Go
+cd rust && cargo test && cargo clippy --all-targets -- -D warnings
+cd typescript && npm ci && npm run coverage
+cd python && python -m pytest
 cd go && go test ./...
-
-# PHP
-cd php && php tests/smoke.php
+cd php && php tests/run.php
+python3 vectors/build_vectors.py && bash scripts/lombok-doctor.sh LombokCLIParse
 ```
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).

@@ -1,3 +1,3 @@
-module github.com/codinglombok/LombokCLIParse/go
+module github.com/codinglombok/lombokcliparse/go
 
-go 1.21
+go 1.22
